@@ -1,4 +1,4 @@
-use std::{fmt::Write, ptr, slice, str};
+use std::{ffi::CString, fmt::Write, ptr, slice, str};
 
 use windows::{
     core::{s, PCSTR},
@@ -208,7 +208,7 @@ impl User {
 
         match suffix {
             b"0801" => Self::parse_non_admin_data(data),
-            b"0001" => data.find("uwNSCO0Igow=").map_or_else(
+            b"0001" | b"1801" => data.find("uwNSCO0Igow=").map_or_else(
                 || Self::parse_admin_data(data),
                 |pos| Self::parse_non_admin_data(&data[..pos]),
             ),
@@ -245,7 +245,6 @@ fn main() -> Result<(), Error> {
     }
 
     let mut desc = String::new();
-    let last = users.last().unwrap().clone().plaintext_pw;
     for user in users {
         writeln!(
             &mut desc,
@@ -257,8 +256,13 @@ fn main() -> Result<(), Error> {
 
     println!("{desc}");
     unsafe {
-        MessageBoxA(None, PCSTR::from_raw(desc.as_ptr()), s!("User data"), MB_OK);
-        MessageBoxA(None, PCSTR::from_raw(last.as_ptr()), s!("Test"), MB_OK);
+        let desc_c_str = CString::new(desc).expect("Found null byte in username or password");
+        MessageBoxA(
+            None,
+            PCSTR::from_raw(desc_c_str.as_ptr().cast()),
+            s!("User data"),
+            MB_OK,
+        );
     }
 
     Ok(())
