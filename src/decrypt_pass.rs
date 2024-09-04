@@ -1,4 +1,4 @@
-mod decrypt;
+mod decryption;
 
 fn usage() -> ! {
     let executable = std::env::args()
@@ -8,9 +8,9 @@ fn usage() -> ! {
     std::process::exit(0)
 }
 
-fn main() -> Result<(), decrypt::Error> {
+fn main() -> Result<(), decryption::Error> {
     let passw = std::env::args().nth(1).unwrap_or_else(|| usage());
-    println!("{}", decrypt::decrypt_password(passw.trim())?);
+    println!("{}", decryption::decrypt_password(passw.trim())?);
 
     Ok(())
 }

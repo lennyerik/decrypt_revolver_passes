@@ -19,12 +19,12 @@ use windows::{
     },
 };
 
-mod decrypt;
+mod decryption;
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
     #[error("base64 decode error")]
-    Decrypt(#[from] decrypt::Error),
+    Decrypt(#[from] decryption::Error),
 
     #[error("Win32 error")]
     Win32(#[from] windows_result::Error),
@@ -140,22 +140,14 @@ impl<T: PartialEq> SlicePosition<T> for &[T] {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct User {
     username_initials: String,
     plaintext_pw: String,
 }
 
 impl User {
-    fn try_from_parsed_data(data: &[u8]) -> Option<Self> {
-        let data = &data[..data.position(b"false")?];
-        if &data[data.len() - 4..] != b"0801" {
-            // 0801 -- User
-            // 1801 -- Admin
-            return None;
-        }
-        let data = &data[..data.len() - 4];
-
+    fn parse_non_admin_data(data: &str) -> Option<Self> {
         let username_padding = {
             let p = data.len() % 4;
             if p == 0 {
@@ -165,20 +157,63 @@ impl User {
             }
         };
 
-        let mut username_length = username_padding;
-        while username_length < data.len() {
-            let encrypted_pw_b64 = str::from_utf8(&data[username_length..]).ok()?;
-            if let Ok(plaintext_pw) = decrypt::decrypt_password(encrypted_pw_b64) {
+        for username_length in (username_padding..data.len()).step_by(4) {
+            let (username_initials, encrypted_pw_b64) = data.split_at(username_length);
+            if let Ok(plaintext_pw) = decryption::decrypt_password(encrypted_pw_b64) {
                 return Some(Self {
-                    username_initials: String::from_utf8_lossy(&data[..username_length]).into_owned(),
-                    plaintext_pw
+                    username_initials: username_initials.to_string(),
+                    plaintext_pw,
                 });
             }
-
-            username_length += 4;
         }
 
         None
+    }
+
+    fn parse_admin_data(data: &str) -> Option<Self> {
+        let username_padding = {
+            let p = data.len() % 4;
+            if p == 0 {
+                4
+            } else {
+                p
+            }
+        };
+
+        for username_length in (username_padding..data.len()).step_by(4) {
+            let (username_initials, encrypted_passwords) = data.split_at(username_length);
+
+            // There are two encrypted passwords, one for the account password and the other for the admin password
+            for user_password_length in (4..encrypted_passwords.len()).step_by(4) {
+                let (encrypted_pw_b64, encrypted_admin_pw_b64) =
+                    encrypted_passwords.split_at(user_password_length);
+                let plaintext_pw = decryption::decrypt_password(encrypted_admin_pw_b64)
+                    .and(decryption::decrypt_password(encrypted_pw_b64));
+                if let Ok(plaintext_pw) = plaintext_pw {
+                    return Some(Self {
+                        username_initials: username_initials.to_string(),
+                        plaintext_pw,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    fn try_from_parsed_data(data: &[u8]) -> Option<Self> {
+        let data = &data[..data.position(b"false")?];
+        let (data, suffix) = data.split_at(data.len() - 4);
+        let data = str::from_utf8(data).ok()?;
+
+        match suffix {
+            b"0801" => Self::parse_non_admin_data(data),
+            b"0001" => data.find("uwNSCO0Igow=").map_or_else(
+                || Self::parse_admin_data(data),
+                |pos| Self::parse_non_admin_data(&data[..pos]),
+            ),
+            _ => None,
+        }
     }
 }
 
@@ -210,6 +245,7 @@ fn main() -> Result<(), Error> {
     }
 
     let mut desc = String::new();
+    let last = users.last().unwrap().clone().plaintext_pw;
     for user in users {
         writeln!(
             &mut desc,
@@ -222,6 +258,7 @@ fn main() -> Result<(), Error> {
     println!("{desc}");
     unsafe {
         MessageBoxA(None, PCSTR::from_raw(desc.as_ptr()), s!("User data"), MB_OK);
+        MessageBoxA(None, PCSTR::from_raw(last.as_ptr()), s!("Test"), MB_OK);
     }
 
     Ok(())
